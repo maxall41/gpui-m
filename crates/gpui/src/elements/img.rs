@@ -6,13 +6,13 @@ use crate::{
     Styled, SvgSize, Task, Window, px, swap_rgba_pa_to_bgra,
 };
 use anyhow::{Context as _, Result};
-
 use futures::{AsyncReadExt, Future};
 use image::{
     AnimationDecoder, DynamicImage, Frame, ImageBuffer, ImageError, ImageFormat, Rgba,
     codecs::{gif::GifDecoder, webp::WebPDecoder},
 };
 use smallvec::SmallVec;
+use std::sync::RwLock;
 use std::{
     fs,
     io::{self, Cursor},
@@ -127,6 +127,7 @@ where
 /// The style of an image element.
 pub struct ImageStyle {
     grayscale: bool,
+    use_nearest_filter: bool,
     object_fit: ObjectFit,
     loading: Option<Box<dyn Fn() -> AnyElement>>,
     fallback: Option<Box<dyn Fn() -> AnyElement>>,
@@ -136,6 +137,7 @@ impl Default for ImageStyle {
     fn default() -> Self {
         Self {
             grayscale: false,
+            use_nearest_filter: false,
             object_fit: ObjectFit::Contain,
             loading: None,
             fallback: None,
@@ -151,6 +153,13 @@ pub trait StyledImage: Sized {
     /// Set the image to be displayed in grayscale.
     fn grayscale(mut self, grayscale: bool) -> Self {
         self.image_style().grayscale = grayscale;
+        self
+    }
+
+    /// Set whether to use nearest (pixel-perfect) filtering instead of linear filtering.
+    /// This is useful for pixel art, scientific images, or any content where exact pixel values matter.
+    fn use_nearest_filter(mut self, use_nearest_filter: bool) -> Self {
+        self.image_style().use_nearest_filter = use_nearest_filter;
         self
     }
 
@@ -191,6 +200,8 @@ pub struct Img {
     source: ImageSource,
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
+    /// Layout ID
+    pub coords: Arc<RwLock<Option<Bounds<Pixels>>>>,
 }
 
 /// Create a new image element.
@@ -201,6 +212,7 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         source: source.into(),
         style: ImageStyle::default(),
         image_cache: None,
+        coords: Arc::new(RwLock::new(None)),
     }
 }
 
@@ -421,6 +433,7 @@ impl Element for Img {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        *self.coords.write().unwrap() = Some(bounds);
         self.interactivity.prepaint(
             global_id,
             inspector_id,
@@ -479,6 +492,7 @@ impl Element for Img {
                             data.clone(),
                             layout_state.frame_index,
                             self.style.grayscale,
+                            self.style.use_nearest_filter,
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {

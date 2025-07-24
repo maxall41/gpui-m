@@ -680,10 +680,15 @@ fragment float4 polychrome_sprite_fragment(
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
   PolychromeSprite sprite = sprites[input.sprite_id];
-  constexpr sampler atlas_texture_sampler(mag_filter::linear,
-                                          min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  constexpr sampler linear_sampler(mag_filter::linear, min_filter::linear);
+  constexpr sampler nearest_sampler(mag_filter::nearest, min_filter::nearest);
+
+  float4 sample;
+  if (sprite.use_nearest_filter) {
+    sample = atlas_texture.sample(nearest_sampler, input.tile_position);
+  } else {
+    sample = atlas_texture.sample(linear_sampler, input.tile_position);
+  }
   float distance =
       quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
