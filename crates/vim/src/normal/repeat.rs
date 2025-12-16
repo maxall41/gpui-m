@@ -110,7 +110,24 @@ impl Replayer {
         }
         lock.running = true;
         let this = self.clone();
-        window.defer(cx, move |window, cx| this.next(window, cx))
+        window.defer(cx, move |window, cx| {
+            this.next(window, cx);
+            let Some(Some(workspace)) = window.root::<Workspace>() else {
+                return;
+            };
+            let Some(editor) = workspace
+                .read(cx)
+                .active_item(cx)
+                .and_then(|item| item.act_as::<Editor>(cx))
+            else {
+                return;
+            };
+            editor.update(cx, |editor, cx| {
+                editor
+                    .buffer()
+                    .update(cx, |multi, cx| multi.finalize_last_transaction(cx))
+            });
+        })
     }
 
     pub fn stop(self) {
@@ -213,22 +230,33 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let count = Vim::take_count(cx);
+        if self.active_operator().is_some() {
+            Vim::update_globals(cx, |globals, _| {
+                globals.recording_actions.clear();
+                globals.recording_count = None;
+                globals.dot_recording = false;
+                globals.stop_recording_after_next_action = false;
+            });
+            self.clear_operator(window, cx);
+            return;
+        }
+
         Vim::take_forced_motion(cx);
+        let count = Vim::take_count(cx);
 
         let Some((mut actions, selection, mode)) = Vim::update_globals(cx, |globals, _| {
             let actions = globals.recorded_actions.clone();
             if actions.is_empty() {
                 return None;
             }
-            if globals.replayer.is_none() {
-                if let Some(recording_register) = globals.recording_register {
-                    globals
-                        .recordings
-                        .entry(recording_register)
-                        .or_default()
-                        .push(ReplayableAction::Action(Repeat.boxed_clone()));
-                }
+            if globals.replayer.is_none()
+                && let Some(recording_register) = globals.recording_register
+            {
+                globals
+                    .recordings
+                    .entry(recording_register)
+                    .or_default()
+                    .push(ReplayableAction::Action(Repeat.boxed_clone()));
             }
 
             let mut mode = None;
@@ -320,10 +348,10 @@ impl Vim {
         // vim doesn't treat 3a1 as though you literally repeated a1
         // 3 times, instead it inserts the content thrice at the insert position.
         if let Some(to_repeat) = repeatable_insert(&actions[0]) {
-            if let Some(ReplayableAction::Action(action)) = actions.last() {
-                if NormalBefore.partial_eq(&**action) {
-                    actions.pop();
-                }
+            if let Some(ReplayableAction::Action(action)) = actions.last()
+                && NormalBefore.partial_eq(&**action)
+            {
+                actions.pop();
             }
 
             let mut new_actions = actions.clone();
@@ -792,5 +820,92 @@ mod test {
         cx.shared_state().await.assert_eq("aaaaaaabˇrld");
         cx.simulate_shared_keystrokes("@ b").await;
         cx.shared_state().await.assert_eq("aaaaaaabbbˇd");
+    }
+
+    #[gpui::test]
+    async fn test_repeat_clear(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        // Check that, when repeat is preceded by something other than a number,
+        // the current operator is cleared, in order to prevent infinite loops.
+        cx.set_state("ˇhello world", Mode::Normal);
+        cx.simulate_keystrokes("d .");
+        assert_eq!(cx.active_operator(), None);
+    }
+
+    #[gpui::test]
+    async fn test_repeat_clear_repeat(cx: &mut gpui::TestAppContext) {
+        let mut cx = NeovimBackedTestContext::new(cx).await;
+
+        cx.set_shared_state(indoc! {
+            "ˇthe quick brown
+            fox jumps over
+            the lazy dog"
+        })
+        .await;
+        cx.simulate_shared_keystrokes("d d").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇfox jumps over
+            the lazy dog"
+        });
+        cx.simulate_shared_keystrokes("d . .").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇthe lazy dog"
+        });
+    }
+
+    #[gpui::test]
+    async fn test_repeat_clear_count(cx: &mut gpui::TestAppContext) {
+        let mut cx = NeovimBackedTestContext::new(cx).await;
+
+        cx.set_shared_state(indoc! {
+            "ˇthe quick brown
+            fox jumps over
+            the lazy dog"
+        })
+        .await;
+        cx.simulate_shared_keystrokes("d d").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇfox jumps over
+            the lazy dog"
+        });
+        cx.simulate_shared_keystrokes("2 d .").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇfox jumps over
+            the lazy dog"
+        });
+        cx.simulate_shared_keystrokes(".").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇthe lazy dog"
+        });
+
+        cx.set_shared_state(indoc! {
+            "ˇthe quick brown
+            fox jumps over
+            the lazy dog
+            the quick brown
+            fox jumps over
+            the lazy dog"
+        })
+        .await;
+        cx.simulate_shared_keystrokes("2 d d").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇthe lazy dog
+            the quick brown
+            fox jumps over
+            the lazy dog"
+        });
+        cx.simulate_shared_keystrokes("5 d .").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇthe lazy dog
+            the quick brown
+            fox jumps over
+            the lazy dog"
+        });
+        cx.simulate_shared_keystrokes(".").await;
+        cx.shared_state().await.assert_eq(indoc! {
+            "ˇfox jumps over
+            the lazy dog"
+        });
     }
 }

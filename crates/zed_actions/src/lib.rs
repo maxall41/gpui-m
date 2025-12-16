@@ -27,21 +27,39 @@ pub struct OpenZedUrl {
     pub url: String,
 }
 
+/// Opens the keymap to either add a keybinding or change an existing one
+#[derive(PartialEq, Clone, Default, Action, JsonSchema, Serialize, Deserialize)]
+#[action(namespace = zed, no_json, no_register)]
+pub struct ChangeKeybinding {
+    pub action: String,
+}
+
 actions!(
     zed,
     [
         /// Opens the settings editor.
+        #[action(deprecated_aliases = ["zed_actions::OpenSettingsEditor"])]
         OpenSettings,
+        /// Opens the settings JSON file.
+        #[action(deprecated_aliases = ["zed_actions::OpenSettings"])]
+        OpenSettingsFile,
+        /// Opens project-specific settings.
+        #[action(deprecated_aliases = ["zed_actions::OpenProjectSettings"])]
+        OpenProjectSettings,
         /// Opens the default keymap file.
         OpenDefaultKeymap,
+        /// Opens the user keymap file.
+        #[action(deprecated_aliases = ["zed_actions::OpenKeymap"])]
+        OpenKeymapFile,
+        /// Opens the keymap editor.
+        #[action(deprecated_aliases = ["zed_actions::OpenKeymapEditor"])]
+        OpenKeymap,
         /// Opens account settings.
         OpenAccountSettings,
         /// Opens server settings.
         OpenServerSettings,
         /// Quits the application.
         Quit,
-        /// Opens the user keymap file.
-        OpenKeymap,
         /// Shows information about Zed.
         About,
         /// Opens the documentation website.
@@ -50,6 +68,8 @@ actions!(
         OpenLicenses,
         /// Opens the telemetry log.
         OpenTelemetryLog,
+        /// Opens the performance profiler.
+        OpenPerformanceProfiler,
     ]
 );
 
@@ -62,6 +82,7 @@ pub enum ExtensionCategoryFilter {
     Grammars,
     LanguageServers,
     ContextServers,
+    AgentServers,
     SlashCommands,
     IndexedDocsProviders,
     Snippets,
@@ -97,6 +118,15 @@ pub struct DecreaseBufferFontSize {
 pub struct IncreaseBufferFontSize {
     #[serde(default)]
     pub persist: bool,
+}
+
+/// Increases the font size in the editor buffer.
+#[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zed)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSettingsAt {
+    /// A path to a specific setting (e.g. `theme.mode`)
+    pub path: String,
 }
 
 /// Resets the buffer font size to the default value.
@@ -135,6 +165,15 @@ pub struct ResetUiFontSize {
     pub persist: bool,
 }
 
+/// Resets all zoom levels (UI and buffer font sizes, including in the agent panel) to their default values.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zed)]
+#[serde(deny_unknown_fields)]
+pub struct ResetAllZoom {
+    #[serde(default)]
+    pub persist: bool,
+}
+
 pub mod dev {
     use gpui::actions;
 
@@ -156,7 +195,10 @@ pub mod workspace {
             #[action(deprecated_aliases = ["editor::CopyPath", "outline_panel::CopyPath", "project_panel::CopyPath"])]
             CopyPath,
             #[action(deprecated_aliases = ["editor::CopyRelativePath", "outline_panel::CopyRelativePath", "project_panel::CopyRelativePath"])]
-            CopyRelativePath
+            CopyRelativePath,
+            /// Opens the selected file with the system's default application.
+            #[action(deprecated_aliases = ["project_panel::OpenWithSystem"])]
+            OpenWithSystem,
         ]
     );
 }
@@ -173,21 +215,17 @@ pub mod git {
             Switch,
             /// Selects a different repository.
             SelectRepo,
+            /// Filter remotes.
+            FilterRemotes,
+            /// Create a git remote.
+            CreateRemote,
             /// Opens the git branch selector.
             #[action(deprecated_aliases = ["branches::OpenRecent"])]
-            Branch
-        ]
-    );
-}
-
-pub mod jj {
-    use gpui::actions;
-
-    actions!(
-        jj,
-        [
-            /// Opens the Jujutsu bookmark list.
-            BookmarkList
+            Branch,
+            /// Opens the git stash selector.
+            ViewStash,
+            /// Opens the git worktree selector.
+            Worktree
         ]
     );
 }
@@ -211,21 +249,34 @@ pub mod command_palette {
         command_palette,
         [
             /// Toggles the command palette.
-            Toggle
+            Toggle,
         ]
     );
 }
 
+pub mod project_panel {
+    use gpui::actions;
+
+    actions!(
+        project_panel,
+        [
+            /// Toggles focus on the project panel.
+            ToggleFocus
+        ]
+    );
+}
 pub mod feedback {
     use gpui::actions;
 
     actions!(
         feedback,
         [
+            /// Opens email client to send feedback to Zed support.
+            EmailZed,
             /// Opens the bug report form.
             FileBugReport,
-            /// Opens the feedback form.
-            GiveFeedback
+            /// Opens the feature request form.
+            RequestFeature
         ]
     );
 }
@@ -260,27 +311,47 @@ pub mod icon_theme_selector {
     }
 }
 
+pub mod settings_profile_selector {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+    #[action(namespace = settings_profile_selector)]
+    pub struct Toggle;
+}
+
 pub mod agent {
     use gpui::actions;
 
     actions!(
         agent,
         [
-            /// Opens the agent configuration panel.
-            OpenConfiguration,
+            /// Opens the agent settings panel.
+            #[action(deprecated_aliases = ["agent::OpenConfiguration"])]
+            OpenSettings,
             /// Opens the agent onboarding modal.
             OpenOnboardingModal,
+            /// Opens the ACP onboarding modal.
+            OpenAcpOnboardingModal,
+            /// Opens the Claude Code onboarding modal.
+            OpenClaudeCodeOnboardingModal,
             /// Resets the agent onboarding state.
             ResetOnboarding,
             /// Starts a chat conversation with the agent.
             Chat,
-            /// Displays the previous message in the history.
-            PreviousHistoryMessage,
-            /// Displays the next message in the history.
-            NextHistoryMessage,
             /// Toggles the language model selector dropdown.
             #[action(deprecated_aliases = ["assistant::ToggleModelSelector", "assistant2::ToggleModelSelector"])]
-            ToggleModelSelector
+            ToggleModelSelector,
+            /// Triggers re-authentication on Gemini
+            ReauthenticateAgent,
+            /// Add the current selection as context for threads in the agent panel.
+            #[action(deprecated_aliases = ["assistant::QuoteSelection", "agent::QuoteSelection"])]
+            AddSelectionToThread,
+            /// Resets the agent panel zoom levels (agent UI and buffer font sizes).
+            ResetAgentZoom,
+            /// Toggles the utility/agent pane open/closed state.
+            ToggleAgentPane,
         ]
     );
 }
@@ -358,6 +429,12 @@ pub struct OpenRemote {
     #[serde(default)]
     pub create_new_window: bool,
 }
+
+/// Opens the dev container connection modal.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenDevContainer;
 
 /// Where to spawn the task in the UI.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -477,3 +554,46 @@ actions!(
         OpenProjectDebugTasks,
     ]
 );
+
+pub mod vim {
+    use gpui::actions;
+
+    actions!(
+        vim,
+        [
+            /// Opens the default keymap file.
+            OpenDefaultKeymap
+        ]
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WslConnectionOptions {
+    pub distro_name: String,
+    pub user: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+pub mod wsl_actions {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// Opens a folder inside Wsl.
+    #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+    #[action(namespace = projects)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenFolderInWsl {
+        #[serde(default)]
+        pub create_new_window: bool,
+    }
+
+    /// Open a wsl distro.
+    #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+    #[action(namespace = projects)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenWsl {
+        #[serde(default)]
+        pub create_new_window: bool,
+    }
+}

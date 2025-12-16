@@ -5,7 +5,7 @@
 
 ## Using Zed's built-in debugger
 
-While the Zed project is open you can open the `New Process Modal` and select the `Debug` tab. There you can see to debug configurations to debug Zed with, one for GDB and one for LLDB. Select the configuration you want and Zed will build and launch the binary.
+While the Zed project is open you can open the `New Process Modal` and select the `Debug` tab. There you can see two debug configurations to debug Zed with, one for GDB and one for LLDB. Select the configuration you want and Zed will build and launch the binary.
 
 Please note, GDB isn't supported on arm Macbooks
 
@@ -93,9 +93,9 @@ rust-lldb -p <pid>
 
 Where `<pid>` is the process ID of the Zed instance you want to attach to.
 
-To get the process ID of a running Zed instance, you can use your systems process management tools such as `Task Manager` on windows or `Activity Monitor` on MacOS.
+To get the process ID of a running Zed instance, you can use your systems process management tools such as `Task Manager` on windows or `Activity Monitor` on macOS.
 
-Alternatively, you can run the `ps aux | grep zed` command on MacOS and Linux or `Get-Process | Select-Object Id, ProcessName` in an instance of PowerShell on Windows.
+Alternatively, you can run the `ps aux | grep zed` command on macOS and Linux or `Get-Process | Select-Object Id, ProcessName` in an instance of PowerShell on Windows.
 
 #### Debugging Panics and Crashes
 

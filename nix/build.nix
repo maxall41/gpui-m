@@ -145,7 +145,6 @@ let
         ]
         ++ lib.optionals stdenv'.hostPlatform.isDarwin [
           apple-sdk_15
-          darwin.apple_sdk.frameworks.System
           (darwinMinVersionHook "10.15")
         ];
 
@@ -171,13 +170,14 @@ let
         ZSTD_SYS_USE_PKG_CONFIG = true;
         FONTCONFIG_FILE = makeFontsConf {
           fontDirectories = [
-            ../assets/fonts/plex-mono
-            ../assets/fonts/plex-sans
+            ../assets/fonts/lilex
+            ../assets/fonts/ibm-plex-sans
           ];
         };
         ZED_UPDATE_EXPLANATION = "Zed has been installed using Nix. Auto-updates have thus been disabled.";
         RELEASE_VERSION = version;
         LK_CUSTOM_WEBRTC = livekit-libwebrtc;
+        PROTOC="${protobuf}/bin/protoc";
 
         CARGO_PROFILE = profile;
         # need to handle some profiles specially https://github.com/rust-lang/cargo/issues/11053
@@ -298,6 +298,7 @@ craneLib.buildPackage (
             export APP_ARGS="%U"
             mkdir -p "$out/share/applications"
             ${lib.getExe envsubst} < "crates/zed/resources/zed.desktop.in" > "$out/share/applications/dev.zed.Zed-Nightly.desktop"
+            chmod +x "$out/share/applications/dev.zed.Zed-Nightly.desktop"
           )
 
           runHook postInstall

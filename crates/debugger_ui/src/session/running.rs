@@ -5,17 +5,23 @@ pub(crate) mod memory_view;
 pub(crate) mod module_list;
 pub mod stack_frame_list;
 pub mod variable_list;
-use std::{any::Any, ops::ControlFlow, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    ops::ControlFlow,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use crate::{
     ToggleExpandItem,
+    attach_modal::{AttachModal, ModalIntent},
     new_process_modal::resolve_path,
     persistence::{self, DebuggerPaneItem, SerializedLayout},
     session::running::memory_view::MemoryView,
 };
 
-use super::DebugPanelItemEvent;
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use breakpoint_list::BreakpointList;
 use collections::{HashMap, IndexMap};
 use console::Console;
@@ -36,22 +42,19 @@ use module_list::ModuleList;
 use project::{
     DebugScenarioContext, Project, WorktreeId,
     debugger::session::{self, Session, SessionEvent, SessionStateEvent, ThreadId, ThreadStatus},
-    terminals::TerminalKind,
 };
 use rpc::proto::ViewId;
 use serde_json::Value;
 use settings::Settings;
 use stack_frame_list::StackFrameList;
 use task::{
-    BuildTaskDefinition, DebugScenario, ShellBuilder, SpawnInTerminal, TaskContext, ZedDebugConfig,
-    substitute_variables_in_str,
+    BuildTaskDefinition, DebugScenario, Shell, ShellBuilder, SpawnInTerminal, TaskContext,
+    ZedDebugConfig, substitute_variables_in_str,
 };
 use terminal_view::TerminalView;
 use ui::{
-    ActiveTheme, AnyElement, App, ButtonCommon as _, Clickable as _, Context, FluentBuilder,
-    IconButton, IconName, IconSize, InteractiveElement, IntoElement, Label, LabelCommon as _,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Tab, Tooltip,
-    VisibleOnHover, VisualContext, Window, div, h_flex, v_flex,
+    FluentBuilder, IntoElement, Render, StatefulInteractiveElement, Tab, Tooltip, VisibleOnHover,
+    VisualContext, prelude::*,
 };
 use util::ResultExt;
 use variable_list::VariableList;
@@ -59,6 +62,9 @@ use workspace::{
     ActivePaneDecorator, DraggedTab, Item, ItemHandle, Member, Pane, PaneGroup, SplitDirection,
     Workspace, item::TabContentParams, move_item, pane::Event,
 };
+
+static PROCESS_ID_PLACEHOLDER: LazyLock<String> =
+    LazyLock::new(|| task::VariableName::PickProcessId.template_value());
 
 pub struct RunningState {
     session: Entity<Session>,
@@ -104,7 +110,7 @@ impl Render for RunningState {
             .find(|pane| pane.read(cx).is_zoomed());
 
         let active = self.panes.panes().into_iter().next();
-        let pane = if let Some(ref zoomed_pane) = zoomed_pane {
+        let pane = if let Some(zoomed_pane) = zoomed_pane {
             zoomed_pane.update(cx, |pane, cx| pane.render(window, cx).into_any_element())
         } else if let Some(active) = active {
             self.panes
@@ -160,6 +166,29 @@ impl SubView {
         })
     }
 
+    pub(crate) fn stack_frame_list(
+        stack_frame_list: Entity<StackFrameList>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let weak_list = stack_frame_list.downgrade();
+        let this = Self::new(
+            stack_frame_list.focus_handle(cx),
+            stack_frame_list.into(),
+            DebuggerPaneItem::Frames,
+            cx,
+        );
+
+        this.update(cx, |this, _| {
+            this.with_actions(Box::new(move |_, cx| {
+                weak_list
+                    .update(cx, |this, _| this.render_control_strip())
+                    .unwrap_or_else(|_| div().into_any_element())
+            }));
+        });
+
+        this
+    }
+
     pub(crate) fn console(console: Entity<Console>, cx: &mut App) -> Entity<Self> {
         let weak_console = console.downgrade();
         let this = Self::new(
@@ -182,7 +211,7 @@ impl SubView {
         let weak_list = list.downgrade();
         let focus_handle = list.focus_handle(cx);
         let this = Self::new(
-            focus_handle.clone(),
+            focus_handle,
             list.into(),
             DebuggerPaneItem::BreakpointList,
             cx,
@@ -257,10 +286,10 @@ impl Item for SubView {
 impl Render for SubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
-            .id(SharedString::from(format!(
+            .id(format!(
                 "subview-container-{}",
                 self.kind.to_shared_string()
-            )))
+            ))
             .on_hover(cx.listener(|this, hovered, _, cx| {
                 this.hovered = *hovered;
                 cx.notify();
@@ -293,7 +322,7 @@ pub(crate) fn new_debugger_pane(
             let Some(project) = project.upgrade() else {
                 return ControlFlow::Break(());
             };
-            let this_pane = cx.entity().clone();
+            let this_pane = cx.entity();
             let item = if tab.pane == this_pane {
                 pane.item_for_index(tab.ix)
             } else {
@@ -319,7 +348,7 @@ pub(crate) fn new_debugger_pane(
                         debug_assert!(_previous_subscription.is_none());
                         running
                             .panes
-                            .split(&this_pane, &new_pane, split_direction)?;
+                            .split(&this_pane, &new_pane, split_direction, cx)?;
                         anyhow::Ok(new_pane)
                     })
                 })
@@ -360,13 +389,14 @@ pub(crate) fn new_debugger_pane(
         }
     };
 
-    let ret = cx.new(move |cx| {
+    cx.new(move |cx| {
         let mut pane = Pane::new(
             workspace.clone(),
             project.clone(),
             Default::default(),
             None,
             NoAction.boxed_clone(),
+            true,
             window,
             cx,
         );
@@ -416,19 +446,19 @@ pub(crate) fn new_debugger_pane(
                     .and_then(|item| item.downcast::<SubView>());
                 let is_hovered = as_subview
                     .as_ref()
-                    .map_or(false, |item| item.read(cx).hovered);
+                    .is_some_and(|item| item.read(cx).hovered);
 
                 h_flex()
-                    .group(pane_group_id.clone())
-                    .justify_between()
-                    .bg(cx.theme().colors().tab_bar_background)
-                    .border_b_1()
-                    .px_2()
-                    .border_color(cx.theme().colors().border)
                     .track_focus(&focus_handle)
+                    .group(pane_group_id.clone())
+                    .pl_1p5()
+                    .pr_1()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().tab_bar_background)
                     .on_action(|_: &menu::Cancel, window, cx| {
                         if cx.stop_active_drag(window) {
-                            return;
                         } else {
                             cx.propagate();
                         }
@@ -450,14 +480,11 @@ pub(crate) fn new_debugger_pane(
                             .children(pane.items().enumerate().map(|(ix, item)| {
                                 let selected = active_pane_item
                                     .as_ref()
-                                    .map_or(false, |active| active.item_id() == item.item_id());
+                                    .is_some_and(|active| active.item_id() == item.item_id());
                                 let deemphasized = !pane.has_focus(window, cx);
                                 let item_ = item.boxed_clone();
                                 div()
-                                    .id(SharedString::from(format!(
-                                        "debugger_tab_{}",
-                                        item.item_id().as_u64()
-                                    )))
+                                    .id(format!("debugger_tab_{}", item.item_id().as_u64()))
                                     .p_1()
                                     .rounded_md()
                                     .cursor_pointer()
@@ -503,7 +530,7 @@ pub(crate) fn new_debugger_pane(
                                     .on_drag(
                                         DraggedTab {
                                             item: item.boxed_clone(),
-                                            pane: cx.entity().clone(),
+                                            pane: cx.entity(),
                                             detail: 0,
                                             is_active: selected,
                                             ix,
@@ -514,6 +541,7 @@ pub(crate) fn new_debugger_pane(
                     )
                     .child({
                         let zoomed = pane.is_zoomed();
+
                         h_flex()
                             .visible_on_hover(pane_group_id)
                             .when(is_hovered, |this| this.visible())
@@ -537,7 +565,7 @@ pub(crate) fn new_debugger_pane(
                                         IconName::Maximize
                                     },
                                 )
-                                .icon_size(IconSize::XSmall)
+                                .icon_size(IconSize::Small)
                                 .on_click(cx.listener(move |pane, _, _, cx| {
                                     let is_zoomed = pane.is_zoomed();
                                     pane.set_zoomed(!is_zoomed, cx);
@@ -545,14 +573,13 @@ pub(crate) fn new_debugger_pane(
                                 }))
                                 .tooltip({
                                     let focus_handle = focus_handle.clone();
-                                    move |window, cx| {
+                                    move |_window, cx| {
                                         let zoomed_text =
                                             if zoomed { "Minimize" } else { "Expand" };
                                         Tooltip::for_action_in(
                                             zoomed_text,
                                             &ToggleExpandItem,
                                             &focus_handle,
-                                            window,
                                             cx,
                                         )
                                     }
@@ -563,9 +590,7 @@ pub(crate) fn new_debugger_pane(
             }
         });
         pane
-    });
-
-    ret
+    })
 }
 
 pub struct DebugTerminal {
@@ -592,10 +617,11 @@ impl DebugTerminal {
 }
 
 impl gpui::Render for DebugTerminal {
-    fn render(&mut self, _window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .size_full()
             .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(cx.theme().colors().editor_background)
             .children(self.terminal.clone())
     }
 }
@@ -626,8 +652,42 @@ impl RunningState {
                 if s.starts_with("\"$ZED_") && s.ends_with('"') {
                     *s = s[1..s.len() - 1].to_string();
                 }
-                if let Some(substituted) = substitute_variables_in_str(&s, context) {
+                if let Some(substituted) = substitute_variables_in_str(s, context) {
                     *s = substituted;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn contains_substring(config: &serde_json::Value, substring: &str) -> bool {
+        match config {
+            serde_json::Value::Object(obj) => obj
+                .values()
+                .any(|value| Self::contains_substring(value, substring)),
+            serde_json::Value::Array(array) => array
+                .iter()
+                .any(|value| Self::contains_substring(value, substring)),
+            serde_json::Value::String(s) => s.contains(substring),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn substitute_process_id_in_config(config: &mut serde_json::Value, process_id: i32) {
+        match config {
+            serde_json::Value::Object(obj) => {
+                obj.values_mut().for_each(|value| {
+                    Self::substitute_process_id_in_config(value, process_id);
+                });
+            }
+            serde_json::Value::Array(array) => {
+                array.iter_mut().for_each(|value| {
+                    Self::substitute_process_id_in_config(value, process_id);
+                });
+            }
+            serde_json::Value::String(s) => {
+                if s.contains(PROCESS_ID_PLACEHOLDER.as_str()) {
+                    *s = s.replace(PROCESS_ID_PLACEHOLDER.as_str(), &process_id.to_string());
                 }
             }
             _ => {}
@@ -656,7 +716,7 @@ impl RunningState {
                 }
                 resolve_path(s);
 
-                if let Some(substituted) = substitute_variables_in_str(&s, context) {
+                if let Some(substituted) = substitute_variables_in_str(s, context) {
                     *s = substituted;
                 }
             }
@@ -918,7 +978,12 @@ impl RunningState {
         let task_store = project.read(cx).task_store().downgrade();
         let weak_project = project.downgrade();
         let weak_workspace = workspace.downgrade();
-        let is_local = project.read(cx).is_local();
+        let is_windows = project.read(cx).path_style(cx).is_windows();
+        let remote_shell = project
+            .read(cx)
+            .remote_client()
+            .as_ref()
+            .and_then(|remote| remote.read(cx).shell());
 
         cx.spawn_in(window, async move |this, cx| {
             let DebugScenario {
@@ -930,6 +995,31 @@ impl RunningState {
             } = scenario;
             Self::relativize_paths(None, &mut config, &task_context);
             Self::substitute_variables_in_config(&mut config, &task_context);
+
+            if Self::contains_substring(&config, PROCESS_ID_PLACEHOLDER.as_str()) || label.as_ref().contains(PROCESS_ID_PLACEHOLDER.as_str()) {
+                let (tx, rx) = futures::channel::oneshot::channel::<Option<i32>>();
+
+                let weak_workspace_clone = weak_workspace.clone();
+                weak_workspace.update_in(cx, |workspace, window, cx| {
+                    let project = workspace.project().clone();
+                    workspace.toggle_modal(window, cx, |window, cx| {
+                        AttachModal::new(
+                            ModalIntent::ResolveProcessId(Some(tx)),
+                            weak_workspace_clone,
+                            project,
+                            true,
+                            window,
+                            cx,
+                        )
+                    });
+                }).ok();
+
+                let Some(process_id) = rx.await.ok().flatten() else {
+                    bail!("No process selected with config that contains {}", PROCESS_ID_PLACEHOLDER.as_str())
+                };
+
+                Self::substitute_process_id_in_config(&mut config, process_id);
+            }
 
             let request_type = match dap_registry
                 .adapter(&adapter)
@@ -953,7 +1043,7 @@ impl RunningState {
                                 inventory.read(cx).task_template_by_label(
                                     buffer,
                                     worktree_id,
-                                    &label,
+                                    label,
                                     cx,
                                 )
                             })
@@ -965,7 +1055,7 @@ impl RunningState {
                         (task, None)
                     }
                 };
-                let Some(task) = task_template.resolve_task("debug-build-task", &task_context) else {
+                let Some(mut task) = task_template.resolve_task("debug-build-task", &task_context) else {
                     anyhow::bail!("Could not resolve task variables within a debug scenario");
                 };
 
@@ -1002,8 +1092,12 @@ impl RunningState {
                     None
                 };
 
-                let builder = ShellBuilder::new(is_local, &task.resolved.shell);
-                let command_label = builder.command_label(&task.resolved.command_label);
+                if let Some(remote_shell) = remote_shell && task.resolved.shell == Shell::System {
+                    task.resolved.shell = Shell::Program(remote_shell);
+                }
+
+                let builder = ShellBuilder::new(&task.resolved.shell, is_windows);
+                let command_label = builder.command_label(task.resolved.command.as_deref().unwrap_or(""));
                 let (command, args) =
                     builder.build(task.resolved.command.clone(), &task.resolved.args);
 
@@ -1014,14 +1108,12 @@ impl RunningState {
                     ..task.resolved.clone()
                 };
                 let terminal = project
-                    .update_in(cx, |project, window, cx| {
-                        project.create_terminal(
-                            TerminalKind::Task(task_with_shell.clone()),
-                            window.window_handle(),
+                    .update(cx, |project, cx| {
+                        project.create_terminal_task(
+                            task_with_shell.clone(),
                             cx,
                         )
-                    })?
-                    .await?;
+                    })?.await?;
 
                 let terminal_view = cx.new_window_entity(|window, cx| {
                     TerminalView::new(
@@ -1116,9 +1208,8 @@ impl RunningState {
         };
         let session = self.session.read(cx);
 
-        let cwd = Some(&request.cwd)
-            .filter(|cwd| cwd.len() > 0)
-            .map(PathBuf::from)
+        let cwd = (!request.cwd.is_empty())
+            .then(|| PathBuf::from(&request.cwd))
             .or_else(|| session.binary().unwrap().cwd.clone());
 
         let mut envs: HashMap<String, String> =
@@ -1153,7 +1244,7 @@ impl RunningState {
             } else {
                 None
             }
-        } else if args.len() > 0 {
+        } else if !args.is_empty() {
             Some(args.remove(0))
         } else {
             None
@@ -1166,13 +1257,13 @@ impl RunningState {
             .filter(|title| !title.is_empty())
             .or_else(|| command.clone())
             .unwrap_or_else(|| "Debug terminal".to_string());
-        let kind = TerminalKind::Task(task::SpawnInTerminal {
+        let kind = task::SpawnInTerminal {
             id: task::TaskId("debug".to_string()),
             full_label: title.clone(),
             label: title.clone(),
-            command: command.clone(),
+            command,
             args,
-            command_label: title.clone(),
+            command_label: title,
             cwd,
             env: envs,
             use_new_terminal: true,
@@ -1184,14 +1275,13 @@ impl RunningState {
             show_summary: false,
             show_command: false,
             show_rerun: false,
-        });
+        };
 
         let workspace = self.workspace.clone();
         let weak_project = project.downgrade();
 
-        let terminal_task = project.update(cx, |project, cx| {
-            project.create_terminal(kind, window.window_handle(), cx)
-        });
+        let terminal_task =
+            project.update(cx, |project, cx| project.create_terminal_task(kind, cx));
         let terminal_task = cx.spawn_in(window, async move |_, cx| {
             let terminal = terminal_task.await?;
 
@@ -1209,7 +1299,6 @@ impl RunningState {
 
             terminal.read_with(cx, |terminal, _| {
                 terminal
-                    .pty_info
                     .pid()
                     .map(|pid| pid.as_u32())
                     .context("Terminal was spawned but PID was not available")
@@ -1312,7 +1401,7 @@ impl RunningState {
         let mut pane_item_status = IndexMap::from_iter(
             DebuggerPaneItem::all()
                 .iter()
-                .filter(|kind| kind.is_supported(&caps))
+                .filter(|kind| kind.is_supported(caps))
                 .map(|kind| (*kind, false)),
         );
         self.panes.panes().iter().for_each(|pane| {
@@ -1373,7 +1462,7 @@ impl RunningState {
         this.serialize_layout(window, cx);
         match event {
             Event::Remove { .. } => {
-                let _did_find_pane = this.panes.remove(&source_pane).is_ok();
+                let _did_find_pane = this.panes.remove(source_pane, cx).is_ok();
                 debug_assert!(_did_find_pane);
                 cx.notify();
             }
@@ -1651,7 +1740,7 @@ impl RunningState {
 
         let is_building = self.session.update(cx, |session, cx| {
             session.shutdown(cx).detach();
-            matches!(session.mode, session::SessionState::Building(_))
+            matches!(session.state, session::SessionState::Booting(_))
         });
 
         if is_building {
@@ -1761,7 +1850,7 @@ impl RunningState {
             this.activate_item(0, false, false, window, cx);
         });
 
-        let rightmost_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);
+        let rightmost_pane = new_debugger_pane(workspace.clone(), project, window, cx);
         rightmost_pane.update(cx, |this, cx| {
             this.add_item(
                 Box::new(SubView::new(
@@ -1800,13 +1889,11 @@ impl RunningState {
         Member::Axis(group_root)
     }
 
-    pub(crate) fn invert_axies(&mut self) {
+    pub(crate) fn invert_axies(&mut self, cx: &mut App) {
         self.dock_axis = self.dock_axis.invert();
-        self.panes.invert_axies();
+        self.panes.invert_axies(cx);
     }
 }
-
-impl EventEmitter<DebugPanelItemEvent> for RunningState {}
 
 impl Focusable for RunningState {
     fn focus_handle(&self, _: &App) -> FocusHandle {

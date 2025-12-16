@@ -16,18 +16,18 @@ pub use typed_envelope::*;
 
 include!(concat!(env!("OUT_DIR"), "/zed.messages.rs"));
 
-pub const SSH_PEER_ID: PeerId = PeerId { owner_id: 0, id: 0 };
-pub const SSH_PROJECT_ID: u64 = 0;
+pub const REMOTE_SERVER_PEER_ID: PeerId = PeerId { owner_id: 0, id: 0 };
+pub const REMOTE_SERVER_PROJECT_ID: u64 = 0;
 
 messages!(
-    (AcceptTermsOfService, Foreground),
-    (AcceptTermsOfServiceResponse, Foreground),
     (Ack, Foreground),
     (AckBufferOperation, Background),
     (AckChannelMessage, Background),
     (ActivateToolchain, Foreground),
     (ActiveToolchain, Foreground),
     (ActiveToolchainResponse, Foreground),
+    (ResolveToolchain, Background),
+    (ResolveToolchainResponse, Background),
     (AddNotification, Foreground),
     (AddProjectCollaborator, Foreground),
     (AddWorktree, Foreground),
@@ -49,8 +49,10 @@ messages!(
     (ChannelMessageUpdate, Foreground),
     (CloseBuffer, Foreground),
     (Commit, Background),
+    (RunGitHook, Background),
     (CopyProjectEntry, Foreground),
     (CreateBufferForPeer, Foreground),
+    (CreateImageForPeer, Foreground),
     (CreateChannel, Foreground),
     (CreateChannelResponse, Foreground),
     (CreateContext, Foreground),
@@ -99,14 +101,14 @@ messages!(
     (GetHoverResponse, Background),
     (GetNotifications, Foreground),
     (GetNotificationsResponse, Foreground),
-    (GetPanicFiles, Background),
-    (GetPanicFilesResponse, Background),
+    (GetCrashFiles, Background),
+    (GetCrashFilesResponse, Background),
     (GetPathMetadata, Background),
     (GetPathMetadataResponse, Background),
     (GetPermalinkToLine, Foreground),
+    (GetProcesses, Background),
+    (GetProcessesResponse, Background),
     (GetPermalinkToLineResponse, Foreground),
-    (GetPrivateUserInfo, Foreground),
-    (GetPrivateUserInfoResponse, Foreground),
     (GetProjectSymbols, Background),
     (GetProjectSymbolsResponse, Background),
     (GetReferences, Background),
@@ -119,10 +121,6 @@ messages!(
     (GetTypeDefinitionResponse, Background),
     (GetImplementation, Background),
     (GetImplementationResponse, Background),
-    (GetLlmToken, Background),
-    (GetLlmTokenResponse, Background),
-    (LanguageServerIdForName, Background),
-    (LanguageServerIdForNameResponse, Background),
     (OpenUnstagedDiff, Foreground),
     (OpenUnstagedDiffResponse, Foreground),
     (OpenUncommittedDiff, Foreground),
@@ -177,15 +175,17 @@ messages!(
     (MarkNotificationRead, Foreground),
     (MoveChannel, Foreground),
     (ReorderChannel, Foreground),
-    (MultiLspQuery, Background),
-    (MultiLspQueryResponse, Background),
+    (LspQuery, Background),
+    (LspQueryResponse, Background),
     (OnTypeFormatting, Background),
     (OnTypeFormattingResponse, Background),
     (OpenBufferById, Background),
     (OpenBufferByPath, Background),
+    (OpenImageByPath, Background),
     (OpenBufferForSymbol, Background),
     (OpenBufferForSymbolResponse, Background),
     (OpenBufferResponse, Background),
+    (OpenImageResponse, Background),
     (OpenCommitMessageBuffer, Background),
     (OpenContext, Foreground),
     (OpenContextResponse, Foreground),
@@ -198,7 +198,6 @@ messages!(
     (PrepareRenameResponse, Background),
     (ProjectEntryResponse, Foreground),
     (RefreshInlayHints, Foreground),
-    (RefreshLlmToken, Background),
     (RegisterBufferWithLanguageServers, Background),
     (RejoinChannelBuffers, Foreground),
     (RejoinChannelBuffersResponse, Foreground),
@@ -261,6 +260,10 @@ messages!(
     (Unfollow, Foreground),
     (UnshareProject, Foreground),
     (Unstage, Background),
+    (Stash, Background),
+    (StashPop, Background),
+    (StashApply, Background),
+    (StashDrop, Background),
     (UpdateBuffer, Foreground),
     (UpdateBufferFile, Foreground),
     (UpdateChannelBuffer, Foreground),
@@ -280,16 +283,19 @@ messages!(
     (UpdateProject, Foreground),
     (UpdateProjectCollaborator, Foreground),
     (UpdateUserChannels, Foreground),
-    (UpdateUserPlan, Foreground),
     (UpdateWorktree, Foreground),
     (UpdateWorktreeSettings, Foreground),
+    (UpdateUserSettings, Background),
     (UpdateRepository, Foreground),
     (RemoveRepository, Foreground),
     (UsersResponse, Foreground),
     (GitReset, Background),
+    (GitDeleteBranch, Background),
     (GitCheckoutFiles, Background),
     (GitShow, Background),
     (GitCommitDetails, Background),
+    (GitFileHistory, Background),
+    (GitFileHistoryResponse, Background),
     (SetIndexText, Background),
     (Push, Background),
     (Fetch, Background),
@@ -299,8 +305,11 @@ messages!(
     (RemoteMessageResponse, Background),
     (AskPassRequest, Background),
     (AskPassResponse, Background),
+    (GitCreateRemote, Background),
+    (GitRemoveRemote, Background),
     (GitCreateBranch, Background),
     (GitChangeBranch, Background),
+    (GitRenameBranch, Background),
     (CheckForPushedCommits, Background),
     (CheckForPushedCommitsResponse, Background),
     (GitDiff, Background),
@@ -313,11 +322,31 @@ messages!(
     (LogToDebugConsole, Background),
     (GetDocumentDiagnostics, Background),
     (GetDocumentDiagnosticsResponse, Background),
-    (PullWorkspaceDiagnostics, Background)
+    (PullWorkspaceDiagnostics, Background),
+    (GetDefaultBranch, Background),
+    (GetDefaultBranchResponse, Background),
+    (GetTreeDiff, Background),
+    (GetTreeDiffResponse, Background),
+    (GetBlobContent, Background),
+    (GetBlobContentResponse, Background),
+    (GitClone, Background),
+    (GitCloneResponse, Background),
+    (ToggleLspLogs, Background),
+    (GetDirectoryEnvironment, Background),
+    (DirectoryEnvironment, Background),
+    (GetAgentServerCommand, Background),
+    (AgentServerCommand, Background),
+    (ExternalAgentsUpdated, Background),
+    (ExternalExtensionAgentsUpdated, Background),
+    (ExternalAgentLoadingStatusUpdated, Background),
+    (NewExternalAgentVersionAvailable, Background),
+    (RemoteStarted, Background),
+    (GitGetWorktrees, Background),
+    (GitWorktreesResponse, Background),
+    (GitCreateWorktree, Background)
 );
 
 request_messages!(
-    (AcceptTermsOfService, AcceptTermsOfServiceResponse),
     (ApplyCodeAction, ApplyCodeActionResponse),
     (
         ApplyCompletionAdditionalEdits,
@@ -326,6 +355,7 @@ request_messages!(
     (Call, Ack),
     (CancelCall, Ack),
     (Commit, Ack),
+    (RunGitHook, Ack),
     (CopyProjectEntry, ProjectEntryResponse),
     (CreateChannel, CreateChannelResponse),
     (CreateProjectEntry, ProjectEntryResponse),
@@ -350,9 +380,7 @@ request_messages!(
     (GetDocumentHighlights, GetDocumentHighlightsResponse),
     (GetDocumentSymbols, GetDocumentSymbolsResponse),
     (GetHover, GetHoverResponse),
-    (GetLlmToken, GetLlmTokenResponse),
     (GetNotifications, GetNotificationsResponse),
-    (GetPrivateUserInfo, GetPrivateUserInfoResponse),
     (GetProjectSymbols, GetProjectSymbolsResponse),
     (GetReferences, GetReferencesResponse),
     (GetSignatureHelp, GetSignatureHelpResponse),
@@ -380,6 +408,7 @@ request_messages!(
     (OnTypeFormatting, OnTypeFormattingResponse),
     (OpenBufferById, OpenBufferResponse),
     (OpenBufferByPath, OpenBufferResponse),
+    (OpenImageByPath, OpenImageResponse),
     (OpenBufferForSymbol, OpenBufferForSymbolResponse),
     (OpenCommitMessageBuffer, OpenBufferResponse),
     (OpenNewBuffer, OpenBufferResponse),
@@ -419,20 +448,24 @@ request_messages!(
     (TaskContextForLocation, TaskContext),
     (Test, Test),
     (Unstage, Ack),
+    (Stash, Ack),
+    (StashPop, Ack),
+    (StashApply, Ack),
+    (StashDrop, Ack),
     (UpdateBuffer, Ack),
     (UpdateParticipantLocation, Ack),
     (UpdateProject, Ack),
     (UpdateWorktree, Ack),
     (UpdateRepository, Ack),
     (RemoveRepository, Ack),
-    (LanguageServerIdForName, LanguageServerIdForNameResponse),
     (LspExtExpandMacro, LspExtExpandMacroResponse),
     (LspExtOpenDocs, LspExtOpenDocsResponse),
     (LspExtRunnables, LspExtRunnablesResponse),
     (SetRoomParticipantRole, Ack),
     (BlameBuffer, BlameBufferResponse),
     (RejoinRemoteProjects, RejoinRemoteProjectsResponse),
-    (MultiLspQuery, MultiLspQueryResponse),
+    (LspQuery, Ack),
+    (LspQueryResponse, Ack),
     (RestartLanguageServers, Ack),
     (StopLanguageServers, Ack),
     (OpenContext, OpenContextResponse),
@@ -455,14 +488,17 @@ request_messages!(
     (ListToolchains, ListToolchainsResponse),
     (ActivateToolchain, Ack),
     (ActiveToolchain, ActiveToolchainResponse),
+    (ResolveToolchain, ResolveToolchainResponse),
     (GetPathMetadata, GetPathMetadataResponse),
-    (GetPanicFiles, GetPanicFilesResponse),
+    (GetCrashFiles, GetCrashFilesResponse),
     (CancelLanguageServerWork, Ack),
     (SyncExtensions, SyncExtensionsResponse),
     (InstallExtension, Ack),
     (RegisterBufferWithLanguageServers, Ack),
     (GitShow, GitCommitDetails),
+    (GitFileHistory, GitFileHistoryResponse),
     (GitReset, Ack),
+    (GitDeleteBranch, Ack),
     (GitCheckoutFiles, Ack),
     (SetIndexText, Ack),
     (Push, RemoteMessageResponse),
@@ -470,8 +506,11 @@ request_messages!(
     (GetRemotes, GetRemotesResponse),
     (Pull, RemoteMessageResponse),
     (AskPassRequest, AskPassResponse),
+    (GitCreateRemote, Ack),
+    (GitRemoveRemote, Ack),
     (GitCreateBranch, Ack),
     (GitChangeBranch, Ack),
+    (GitRenameBranch, Ack),
     (CheckForPushedCommits, CheckForPushedCommitsResponse),
     (GitDiff, GitDiffResponse),
     (GitInit, Ack),
@@ -479,7 +518,33 @@ request_messages!(
     (GetDebugAdapterBinary, DebugAdapterBinary),
     (RunDebugLocators, DebugRequest),
     (GetDocumentDiagnostics, GetDocumentDiagnosticsResponse),
-    (PullWorkspaceDiagnostics, Ack)
+    (PullWorkspaceDiagnostics, Ack),
+    (GetDefaultBranch, GetDefaultBranchResponse),
+    (GetBlobContent, GetBlobContentResponse),
+    (GetTreeDiff, GetTreeDiffResponse),
+    (GitClone, GitCloneResponse),
+    (ToggleLspLogs, Ack),
+    (GetDirectoryEnvironment, DirectoryEnvironment),
+    (GetProcesses, GetProcessesResponse),
+    (GetAgentServerCommand, AgentServerCommand),
+    (RemoteStarted, Ack),
+    (GitGetWorktrees, GitWorktreesResponse),
+    (GitCreateWorktree, Ack)
+);
+
+lsp_messages!(
+    (GetReferences, GetReferencesResponse, true),
+    (GetDocumentColor, GetDocumentColorResponse, true),
+    (GetHover, GetHoverResponse, true),
+    (GetCodeActions, GetCodeActionsResponse, true),
+    (GetSignatureHelp, GetSignatureHelpResponse, true),
+    (GetCodeLens, GetCodeLensResponse, true),
+    (GetDocumentDiagnostics, GetDocumentDiagnosticsResponse, true),
+    (GetDefinition, GetDefinitionResponse, true),
+    (GetDeclaration, GetDeclarationResponse, true),
+    (GetTypeDefinition, GetTypeDefinitionResponse, true),
+    (GetImplementation, GetImplementationResponse, true),
+    (InlayHints, InlayHintsResponse, false),
 );
 
 entity_messages!(
@@ -493,9 +558,11 @@ entity_messages!(
     BufferSaved,
     CloseBuffer,
     Commit,
+    RunGitHook,
     GetColorPresentation,
     CopyProjectEntry,
     CreateBufferForPeer,
+    CreateImageForPeer,
     CreateProjectEntry,
     GetDocumentColor,
     DeleteProjectEntry,
@@ -524,13 +591,15 @@ entity_messages!(
     LeaveProject,
     LinkedEditingRange,
     LoadCommitDiff,
-    MultiLspQuery,
+    LspQuery,
+    LspQueryResponse,
     RestartLanguageServers,
     StopLanguageServers,
     OnTypeFormatting,
     OpenNewBuffer,
     OpenBufferById,
     OpenBufferByPath,
+    OpenImageByPath,
     OpenBufferForSymbol,
     OpenCommitMessageBuffer,
     PerformRename,
@@ -549,6 +618,10 @@ entity_messages!(
     TaskContextForLocation,
     UnshareProject,
     Unstage,
+    Stash,
+    StashPop,
+    StashApply,
+    StashDrop,
     UpdateBuffer,
     UpdateBufferFile,
     UpdateDiagnosticSummary,
@@ -560,6 +633,7 @@ entity_messages!(
     UpdateRepository,
     RemoveRepository,
     UpdateWorktreeSettings,
+    UpdateUserSettings,
     LspExtExpandMacro,
     LspExtOpenDocs,
     LspExtRunnables,
@@ -579,19 +653,24 @@ entity_messages!(
     OpenServerSettings,
     GetPermalinkToLine,
     LanguageServerPromptRequest,
-    LanguageServerIdForName,
     GitGetBranches,
     UpdateGitBranch,
     ListToolchains,
     ActivateToolchain,
     ActiveToolchain,
+    ResolveToolchain,
     GetPathMetadata,
+    GetProcesses,
     CancelLanguageServerWork,
     RegisterBufferWithLanguageServers,
     GitShow,
+    GitFileHistory,
     GitReset,
+    GitDeleteBranch,
     GitCheckoutFiles,
     SetIndexText,
+    ToggleLspLogs,
+    GetDirectoryEnvironment,
 
     Push,
     Fetch,
@@ -599,7 +678,10 @@ entity_messages!(
     Pull,
     AskPassRequest,
     GitChangeBranch,
+    GitRenameBranch,
     GitCreateBranch,
+    GitCreateRemote,
+    GitRemoveRemote,
     CheckForPushedCommits,
     GitDiff,
     GitInit,
@@ -609,7 +691,18 @@ entity_messages!(
     GetDebugAdapterBinary,
     LogToDebugConsole,
     GetDocumentDiagnostics,
-    PullWorkspaceDiagnostics
+    PullWorkspaceDiagnostics,
+    GetDefaultBranch,
+    GetTreeDiff,
+    GetBlobContent,
+    GitClone,
+    GetAgentServerCommand,
+    ExternalAgentsUpdated,
+    ExternalExtensionAgentsUpdated,
+    ExternalAgentLoadingStatusUpdated,
+    NewExternalAgentVersionAvailable,
+    GitGetWorktrees,
+    GitCreateWorktree
 );
 
 entity_messages!(
@@ -778,6 +871,28 @@ pub fn split_repository_update(
     }])
 }
 
+impl LspQuery {
+    pub fn query_name_and_write_permissions(&self) -> (&str, bool) {
+        match self.request {
+            Some(lsp_query::Request::GetHover(_)) => ("GetHover", false),
+            Some(lsp_query::Request::GetCodeActions(_)) => ("GetCodeActions", true),
+            Some(lsp_query::Request::GetSignatureHelp(_)) => ("GetSignatureHelp", false),
+            Some(lsp_query::Request::GetCodeLens(_)) => ("GetCodeLens", true),
+            Some(lsp_query::Request::GetDocumentDiagnostics(_)) => {
+                ("GetDocumentDiagnostics", false)
+            }
+            Some(lsp_query::Request::GetDefinition(_)) => ("GetDefinition", false),
+            Some(lsp_query::Request::GetDeclaration(_)) => ("GetDeclaration", false),
+            Some(lsp_query::Request::GetTypeDefinition(_)) => ("GetTypeDefinition", false),
+            Some(lsp_query::Request::GetImplementation(_)) => ("GetImplementation", false),
+            Some(lsp_query::Request::GetReferences(_)) => ("GetReferences", false),
+            Some(lsp_query::Request::GetDocumentColor(_)) => ("GetDocumentColor", false),
+            Some(lsp_query::Request::InlayHints(_)) => ("InlayHints", false),
+            None => ("<unknown>", true),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,25 +919,5 @@ mod tests {
             id: u32::MAX,
         };
         assert_eq!(PeerId::from_u64(peer_id.as_u64()), peer_id);
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn test_proto() {
-        use std::path::PathBuf;
-
-        fn generate_proto_path(path: PathBuf) -> PathBuf {
-            let proto = path.to_proto();
-            PathBuf::from_proto(proto)
-        }
-
-        let path = PathBuf::from("C:\\foo\\bar");
-        assert_eq!(path, generate_proto_path(path.clone()));
-
-        let path = PathBuf::from("C:/foo/bar/");
-        assert_eq!(path, generate_proto_path(path.clone()));
-
-        let path = PathBuf::from("C:/foo\\bar\\");
-        assert_eq!(path, generate_proto_path(path.clone()));
     }
 }

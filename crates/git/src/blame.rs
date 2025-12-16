@@ -1,4 +1,5 @@
 use crate::commit::get_messages;
+use crate::repository::RepoPath;
 use crate::{GitRemote, Oid};
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
@@ -7,7 +8,7 @@ use gpui::SharedString;
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use std::{ops::Range, path::Path};
-use text::Rope;
+use text::{LineEnding, Rope};
 use time::OffsetDateTime;
 use time::UtcOffset;
 use time::macros::format_description;
@@ -18,7 +19,6 @@ pub use git2 as libgit;
 pub struct Blame {
     pub entries: Vec<BlameEntry>,
     pub messages: HashMap<Oid, String>,
-    pub remote_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -33,11 +33,12 @@ impl Blame {
     pub async fn for_path(
         git_binary: &Path,
         working_directory: &Path,
-        path: &Path,
+        path: &RepoPath,
         content: &Rope,
-        remote_url: Option<String>,
+        line_ending: LineEnding,
     ) -> Result<Self> {
-        let output = run_git_blame(git_binary, working_directory, path, content).await?;
+        let output =
+            run_git_blame(git_binary, working_directory, path, content, line_ending).await?;
         let mut entries = parse_git_blame(&output)?;
         entries.sort_unstable_by(|a, b| a.range.start.cmp(&b.range.start));
 
@@ -52,11 +53,7 @@ impl Blame {
             .await
             .context("failed to get commit messages")?;
 
-        Ok(Self {
-            entries,
-            messages,
-            remote_url,
-        })
+        Ok(Self { entries, messages })
     }
 }
 
@@ -66,8 +63,9 @@ const GIT_BLAME_NO_PATH: &str = "fatal: no such path";
 async fn run_git_blame(
     git_binary: &Path,
     working_directory: &Path,
-    path: &Path,
+    path: &RepoPath,
     contents: &Rope,
+    line_ending: LineEnding,
 ) -> Result<String> {
     let mut child = util::command::new_smol_command(git_binary)
         .current_dir(working_directory)
@@ -75,7 +73,7 @@ async fn run_git_blame(
         .arg("--incremental")
         .arg("--contents")
         .arg("-")
-        .arg(path.as_os_str())
+        .arg(path.as_unix_str())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -87,7 +85,7 @@ async fn run_git_blame(
         .as_mut()
         .context("failed to get pipe to stdin of git blame command")?;
 
-    for chunk in contents.chunks() {
+    for chunk in text::chunks_with_line_ending(contents, line_ending) {
         stdin.write_all(chunk.as_bytes()).await?;
     }
     stdin.flush().await?;
@@ -288,14 +286,12 @@ fn parse_git_blame(output: &str) -> Result<Vec<BlameEntry>> {
             }
         };
 
-        if done {
-            if let Some(entry) = current_entry.take() {
-                index.insert(entry.sha, entries.len());
+        if done && let Some(entry) = current_entry.take() {
+            index.insert(entry.sha, entries.len());
 
-                // We only want annotations that have a commit.
-                if !entry.sha.is_zero() {
-                    entries.push(entry);
-                }
+            // We only want annotations that have a commit.
+            if !entry.sha.is_zero() {
+                entries.push(entry);
             }
         }
     }

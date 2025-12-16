@@ -22,11 +22,10 @@ use sea_orm::{
     entity::prelude::*,
     sea_query::{Alias, Expr, OnConflict},
 };
-use semantic_version::SemanticVersion;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
 use std::{
-    fmt::Write as _,
     future::Future,
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -35,18 +34,14 @@ use std::{
 };
 use time::PrimitiveDateTime;
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use util::paths::PathStyle;
 use worktree_settings_file::LocalSettingsKind;
 
 #[cfg(test)]
 pub use tests::TestDb;
 
 pub use ids::*;
-pub use queries::billing_customers::{CreateBillingCustomerParams, UpdateBillingCustomerParams};
-pub use queries::billing_subscriptions::{
-    CreateBillingSubscriptionParams, UpdateBillingSubscriptionParams,
-};
 pub use queries::contributors::ContributorSelector;
-pub use queries::processed_stripe_events::CreateProcessedStripeEventParams;
 pub use sea_orm::ConnectOptions;
 pub use tables::user::Model as User;
 pub use tables::*;
@@ -261,7 +256,7 @@ impl Database {
             let test_options = self.test_options.as_ref().unwrap();
             test_options.executor.simulate_random_delay().await;
             let fail_probability = *test_options.query_failure_probability.lock();
-            if test_options.executor.rng().gen_bool(fail_probability) {
+            if test_options.executor.rng().random_bool(fail_probability) {
                 return Err(anyhow!("simulated query failure"))?;
             }
 
@@ -491,9 +486,7 @@ pub struct ChannelsForUser {
     pub invited_channels: Vec<Channel>,
 
     pub observed_buffer_versions: Vec<proto::ChannelBufferVersion>,
-    pub observed_channel_messages: Vec<proto::ChannelMessageId>,
     pub latest_buffer_versions: Vec<proto::ChannelBufferVersion>,
-    pub latest_channel_messages: Vec<proto::ChannelMessageId>,
 }
 
 #[derive(Debug)]
@@ -529,11 +522,17 @@ pub struct RejoinedProject {
     pub worktrees: Vec<RejoinedWorktree>,
     pub updated_repositories: Vec<proto::UpdateRepository>,
     pub removed_repositories: Vec<u64>,
-    pub language_servers: Vec<proto::LanguageServer>,
+    pub language_servers: Vec<LanguageServer>,
 }
 
 impl RejoinedProject {
     pub fn to_proto(&self) -> proto::RejoinedProject {
+        let (language_servers, language_server_capabilities) = self
+            .language_servers
+            .clone()
+            .into_iter()
+            .map(|server| (server.server, server.capabilities))
+            .unzip();
         proto::RejoinedProject {
             id: self.id.to_proto(),
             worktrees: self
@@ -551,7 +550,8 @@ impl RejoinedProject {
                 .iter()
                 .map(|collaborator| collaborator.to_proto())
                 .collect(),
-            language_servers: self.language_servers.clone(),
+            language_servers,
+            language_server_capabilities,
         }
     }
 }
@@ -598,7 +598,8 @@ pub struct Project {
     pub collaborators: Vec<ProjectCollaborator>,
     pub worktrees: BTreeMap<u64, Worktree>,
     pub repositories: Vec<proto::UpdateRepository>,
-    pub language_servers: Vec<proto::LanguageServer>,
+    pub language_servers: Vec<LanguageServer>,
+    pub path_style: PathStyle,
 }
 
 pub struct ProjectCollaborator {
@@ -621,6 +622,12 @@ impl ProjectCollaborator {
             committer_email: self.committer_email.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LanguageServer {
+    pub server: proto::LanguageServer,
+    pub capabilities: String,
 }
 
 #[derive(Debug)]
@@ -664,7 +671,7 @@ pub struct NewExtensionVersion {
 
 pub struct ExtensionVersionConstraints {
     pub schema_versions: RangeInclusive<i32>,
-    pub wasm_api_versions: RangeInclusive<SemanticVersion>,
+    pub wasm_api_versions: RangeInclusive<semver::Version>,
 }
 
 impl LocalSettingsKind {
@@ -677,7 +684,7 @@ impl LocalSettingsKind {
         }
     }
 
-    pub fn to_proto(&self) -> proto::LocalSettingsKind {
+    pub fn to_proto(self) -> proto::LocalSettingsKind {
         match self {
             Self::Settings => proto::LocalSettingsKind::Settings,
             Self::Tasks => proto::LocalSettingsKind::Tasks,

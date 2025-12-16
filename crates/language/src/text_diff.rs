@@ -1,4 +1,4 @@
-use crate::{CharClassifier, CharKind, LanguageScope};
+use crate::{CharClassifier, CharKind, CharScopeContext, LanguageScope};
 use anyhow::{Context, anyhow};
 use imara_diff::{
     Algorithm, UnifiedDiffBuilder, diff,
@@ -42,6 +42,92 @@ pub fn line_diff(old_text: &str, new_text: &str) -> Vec<(Range<u32>, Range<u32>)
 /// word-based diff within hunks that replace small numbers of lines.
 pub fn text_diff(old_text: &str, new_text: &str) -> Vec<(Range<usize>, Arc<str>)> {
     text_diff_with_options(old_text, new_text, DiffOptions::default())
+}
+
+/// Computes word-level diff ranges between two strings.
+///
+/// Returns a tuple of (old_ranges, new_ranges) where each vector contains
+/// the byte ranges of changed words in the respective text.
+/// Whitespace-only changes are excluded from the results.
+pub fn word_diff_ranges(
+    old_text: &str,
+    new_text: &str,
+    options: DiffOptions,
+) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let mut input: InternedInput<&str> = InternedInput::default();
+    input.update_before(tokenize(old_text, options.language_scope.clone()));
+    input.update_after(tokenize(new_text, options.language_scope));
+
+    let mut old_ranges: Vec<Range<usize>> = Vec::new();
+    let mut new_ranges: Vec<Range<usize>> = Vec::new();
+
+    diff_internal(&input, |old_byte_range, new_byte_range, _, _| {
+        for range in split_on_whitespace(old_text, &old_byte_range) {
+            if let Some(last) = old_ranges.last_mut()
+                && last.end >= range.start
+            {
+                last.end = range.end;
+            } else {
+                old_ranges.push(range);
+            }
+        }
+
+        for range in split_on_whitespace(new_text, &new_byte_range) {
+            if let Some(last) = new_ranges.last_mut()
+                && last.end >= range.start
+            {
+                last.end = range.end;
+            } else {
+                new_ranges.push(range);
+            }
+        }
+    });
+
+    (old_ranges, new_ranges)
+}
+
+fn split_on_whitespace(text: &str, range: &Range<usize>) -> Vec<Range<usize>> {
+    if range.is_empty() {
+        return Vec::new();
+    }
+
+    let slice = &text[range.clone()];
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+
+    for line in slice.lines() {
+        let line_start = offset;
+        let line_end = line_start + line.len();
+        offset = line_end + 1;
+        let trimmed = line.trim();
+
+        if !trimmed.is_empty() {
+            let leading = line.len() - line.trim_start().len();
+            let trailing = line.len() - line.trim_end().len();
+            let trimmed_start = range.start + line_start + leading;
+            let trimmed_end = range.start + line_end - trailing;
+
+            let original_line_start = text[..range.start + line_start]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let original_line_end = text[range.start + line_start..]
+                .find('\n')
+                .map(|i| range.start + line_start + i)
+                .unwrap_or(text.len());
+            let original_line = &text[original_line_start..original_line_end];
+            let original_trimmed_start =
+                original_line_start + (original_line.len() - original_line.trim_start().len());
+            let original_trimmed_end =
+                original_line_end - (original_line.len() - original_line.trim_end().len());
+
+            if trimmed_start > original_trimmed_start || trimmed_end < original_trimmed_end {
+                ranges.push(trimmed_start..trimmed_end);
+            }
+        }
+    }
+
+    ranges
 }
 
 pub struct DiffOptions {
@@ -88,11 +174,11 @@ pub fn text_diff_with_options(
                 let new_offset = new_byte_range.start;
                 hunk_input.clear();
                 hunk_input.update_before(tokenize(
-                    &old_text[old_byte_range.clone()],
+                    &old_text[old_byte_range],
                     options.language_scope.clone(),
                 ));
                 hunk_input.update_after(tokenize(
-                    &new_text[new_byte_range.clone()],
+                    &new_text[new_byte_range],
                     options.language_scope.clone(),
                 ));
                 diff_internal(&hunk_input, |old_byte_range, new_byte_range, _, _| {
@@ -103,7 +189,7 @@ pub fn text_diff_with_options(
                     let replacement_text = if new_byte_range.is_empty() {
                         empty.clone()
                     } else {
-                        new_text[new_byte_range.clone()].into()
+                        new_text[new_byte_range].into()
                     };
                     edits.push((old_byte_range, replacement_text));
                 });
@@ -111,9 +197,9 @@ pub fn text_diff_with_options(
                 let replacement_text = if new_byte_range.is_empty() {
                     empty.clone()
                 } else {
-                    new_text[new_byte_range.clone()].into()
+                    new_text[new_byte_range].into()
                 };
-                edits.push((old_byte_range.clone(), replacement_text));
+                edits.push((old_byte_range, replacement_text));
             }
         },
     );
@@ -154,19 +240,19 @@ fn diff_internal(
         input,
         |old_tokens: Range<u32>, new_tokens: Range<u32>| {
             old_offset += token_len(
-                &input,
+                input,
                 &input.before[old_token_ix as usize..old_tokens.start as usize],
             );
             new_offset += token_len(
-                &input,
+                input,
                 &input.after[new_token_ix as usize..new_tokens.start as usize],
             );
             let old_len = token_len(
-                &input,
+                input,
                 &input.before[old_tokens.start as usize..old_tokens.end as usize],
             );
             let new_len = token_len(
-                &input,
+                input,
                 &input.after[new_tokens.start as usize..new_tokens.end as usize],
             );
             let old_byte_range = old_offset..old_offset + old_len;
@@ -181,19 +267,20 @@ fn diff_internal(
 }
 
 fn tokenize(text: &str, language_scope: Option<LanguageScope>) -> impl Iterator<Item = &str> {
-    let classifier = CharClassifier::new(language_scope).for_completion(true);
+    let classifier =
+        CharClassifier::new(language_scope).scope_context(Some(CharScopeContext::Completion));
     let mut chars = text.char_indices();
     let mut prev = None;
     let mut start_ix = 0;
     iter::from_fn(move || {
-        while let Some((ix, c)) = chars.next() {
+        for (ix, c) in chars.by_ref() {
             let mut token = None;
             let kind = classifier.kind(c);
-            if let Some((prev_char, prev_kind)) = prev {
-                if kind != prev_kind || (kind == CharKind::Punctuation && c != prev_char) {
-                    token = Some(&text[start_ix..ix]);
-                    start_ix = ix;
-                }
+            if let Some((prev_char, prev_kind)) = prev
+                && (kind != prev_kind || (kind == CharKind::Punctuation && c != prev_char))
+            {
+                token = Some(&text[start_ix..ix]);
+                start_ix = ix;
             }
             prev = Some((c, kind));
             if token.is_some() {

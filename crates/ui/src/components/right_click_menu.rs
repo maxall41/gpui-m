@@ -223,7 +223,6 @@ impl<M: ManagedView> Element for RightClickMenu<M> {
 
                 if let Some(mut menu) = request_layout.menu_element.take() {
                     menu.paint(window, cx);
-                    return;
                 }
 
                 let Some(builder) = this.menu_builder.take() else {
@@ -250,12 +249,11 @@ impl<M: ManagedView> Element for RightClickMenu<M> {
 
                         window
                             .subscribe(&new_menu, cx, move |modal, _: &DismissEvent, window, cx| {
-                                if modal.focus_handle(cx).contains_focused(window, cx) {
-                                    if let Some(previous_focus_handle) =
+                                if modal.focus_handle(cx).contains_focused(window, cx)
+                                    && let Some(previous_focus_handle) =
                                         previous_focus_handle.as_ref()
-                                    {
-                                        window.focus(previous_focus_handle);
-                                    }
+                                {
+                                    window.focus(previous_focus_handle);
                                 }
                                 *menu2.borrow_mut() = None;
                                 window.refresh();

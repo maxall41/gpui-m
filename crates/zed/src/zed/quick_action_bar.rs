@@ -2,7 +2,6 @@ mod preview;
 mod repl_menu;
 
 use agent_settings::AgentSettings;
-use client::DisableAiSettings;
 use editor::actions::{
     AddSelectionAbove, AddSelectionBelow, CodeActionSource, DuplicateLineDown, GoToDiagnostic,
     GoToHunk, GoToPreviousDiagnostic, GoToPreviousHunk, MoveLineDown, MoveLineUp, SelectAll,
@@ -16,18 +15,19 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription,
     WeakEntity, Window, anchored, deferred, point,
 };
-use project::project_settings::DiagnosticSeverity;
+use project::{DisableAiSettings, project_settings::DiagnosticSeverity};
 use search::{BufferSearchBar, buffer_search};
 use settings::{Settings, SettingsStore};
 use ui::{
-    ButtonStyle, ContextMenu, ContextMenuEntry, DocumentationSide, IconButton, IconName, IconSize,
-    PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
+    ButtonStyle, ContextMenu, ContextMenuEntry, DocumentationEdge, DocumentationSide, IconButton,
+    IconName, IconSize, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
 };
-use vim_mode_setting::VimModeSetting;
+use vim_mode_setting::{HelixModeSetting, VimModeSetting};
+use workspace::item::ItemBufferKind;
 use workspace::{
     ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace, item::ItemHandle,
 };
-use zed_actions::{assistant::InlineAssist, outline::ToggleOutline};
+use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist, outline::ToggleOutline};
 
 const MAX_CODE_ACTION_MENU_LINES: u32 = 16;
 
@@ -48,20 +48,15 @@ impl QuickActionBar {
         workspace: &Workspace,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut was_ai_disabled = DisableAiSettings::get_global(cx).disable_ai;
-        let mut was_agent_enabled = AgentSettings::get_global(cx).enabled;
+        let mut was_agent_enabled = AgentSettings::get_global(cx).enabled(cx);
         let mut was_agent_button = AgentSettings::get_global(cx).button;
 
         let ai_settings_subscription = cx.observe_global::<SettingsStore>(move |_, cx| {
-            let is_ai_disabled = DisableAiSettings::get_global(cx).disable_ai;
             let agent_settings = AgentSettings::get_global(cx);
+            let is_agent_enabled = agent_settings.enabled(cx);
 
-            if was_ai_disabled != is_ai_disabled
-                || was_agent_enabled != agent_settings.enabled
-                || was_agent_button != agent_settings.button
-            {
-                was_ai_disabled = is_ai_disabled;
-                was_agent_enabled = agent_settings.enabled;
+            if was_agent_enabled != is_agent_enabled || was_agent_button != agent_settings.button {
+                was_agent_enabled = is_agent_enabled;
                 was_agent_button = agent_settings.button;
                 cx.notify();
             }
@@ -137,10 +132,10 @@ impl Render for QuickActionBar {
         let code_action_enabled = editor_value.code_actions_enabled_for_toolbar(cx);
         let focus_handle = editor_value.focus_handle(cx);
 
-        let search_button = editor.is_singleton(cx).then(|| {
+        let search_button = (editor.buffer_kind(cx) == ItemBufferKind::Singleton).then(|| {
             QuickActionBarButton::new(
                 "toggle buffer search",
-                IconName::MagnifyingGlass,
+                search::SEARCH_ICON,
                 !self.buffer_search_bar.read(cx).is_dismissed(),
                 Box::new(buffer_search::Deploy::find()),
                 focus_handle.clone(),
@@ -161,7 +156,7 @@ impl Render for QuickActionBar {
             IconName::ZedAssistant,
             false,
             Box::new(InlineAssist::default()),
-            focus_handle.clone(),
+            focus_handle,
             "Inline Assist",
             move |_, window, cx| {
                 window.dispatch_action(Box::new(InlineAssist::default()), cx);
@@ -175,24 +170,20 @@ impl Render for QuickActionBar {
                 let code_action_menu = menu_ref
                     .as_ref()
                     .filter(|menu| matches!(menu, CodeContextMenu::CodeActions(..)));
-                code_action_menu.as_ref().map_or(false, |menu| {
-                    matches!(menu.origin(), ContextMenuOrigin::QuickActionBar)
-                })
+                code_action_menu
+                    .as_ref()
+                    .is_some_and(|menu| matches!(menu.origin(), ContextMenuOrigin::QuickActionBar))
             };
-            let code_action_element = if is_deployed {
-                editor.update(cx, |editor, cx| {
-                    if let Some(style) = editor.style() {
-                        editor.render_context_menu(&style, MAX_CODE_ACTION_MENU_LINES, window, cx)
-                    } else {
-                        None
-                    }
+            let code_action_element = is_deployed
+                .then(|| {
+                    editor.update(cx, |editor, cx| {
+                        editor.render_context_menu(MAX_CODE_ACTION_MENU_LINES, window, cx)
+                    })
                 })
-            } else {
-                None
-            };
+                .flatten();
             v_flex()
                 .child(
-                    IconButton::new("toggle_code_actions_icon", IconName::Bolt)
+                    IconButton::new("toggle_code_actions_icon", IconName::BoltOutlined)
                         .icon_size(IconSize::Small)
                         .style(ButtonStyle::Subtle)
                         .disabled(!has_available_code_actions)
@@ -215,7 +206,7 @@ impl Render for QuickActionBar {
                             )
                         })
                         .on_click({
-                            let focus = focus.clone();
+                            let focus = focus;
                             move |_, window, cx| {
                                 focus.dispatch_action(
                                     &ToggleCodeActions {
@@ -246,7 +237,13 @@ impl Render for QuickActionBar {
                 .read(cx)
                 .snapshot(cx)
                 .has_diff_hunks();
+            let has_selection = editor.update(cx, |editor, cx| {
+                editor.has_non_empty_selection(&editor.display_snapshot(cx))
+            });
+
             let focus = editor.focus_handle(cx);
+
+            let disable_ai = DisableAiSettings::get_global(cx).disable_ai;
 
             PopoverMenu::new("editor-selections-dropdown")
                 .trigger_with_tooltip(
@@ -271,8 +268,25 @@ impl Render for QuickActionBar {
                             )
                             .action("Expand Selection", Box::new(SelectLargerSyntaxNode))
                             .action("Shrink Selection", Box::new(SelectSmallerSyntaxNode))
-                            .action("Add Cursor Above", Box::new(AddSelectionAbove))
-                            .action("Add Cursor Below", Box::new(AddSelectionBelow))
+                            .action(
+                                "Add Cursor Above",
+                                Box::new(AddSelectionAbove {
+                                    skip_soft_wrap: true,
+                                }),
+                            )
+                            .action(
+                                "Add Cursor Below",
+                                Box::new(AddSelectionBelow {
+                                    skip_soft_wrap: true,
+                                }),
+                            )
+                            .when(!disable_ai, |this| {
+                                this.separator().action_disabled_when(
+                                    !has_selection,
+                                    "Add to Agent Thread",
+                                    Box::new(AddSelectionToThread),
+                                )
+                            })
                             .separator()
                             .action("Go to Symbol", Box::new(ToggleOutline))
                             .action("Go to Line/Column", Box::new(ToggleGoToLine))
@@ -302,6 +316,7 @@ impl Render for QuickActionBar {
         let editor = editor.downgrade();
         let editor_settings_dropdown = {
             let vim_mode_enabled = VimModeSetting::get_global(cx).0;
+            let helix_mode_enabled = HelixModeSetting::get_global(cx).0;
 
             PopoverMenu::new("editor-settings")
                 .trigger_with_tooltip(
@@ -381,7 +396,7 @@ impl Render for QuickActionBar {
                             }
 
                             if has_edit_prediction_provider {
-                                let mut inline_completion_entry = ContextMenuEntry::new("Edit Predictions")
+                                let mut edit_prediction_entry = ContextMenuEntry::new("Edit Predictions")
                                     .toggleable(IconPosition::Start, edit_predictions_enabled_at_cursor && show_edit_predictions)
                                     .disabled(!edit_predictions_enabled_at_cursor)
                                     .action(
@@ -401,12 +416,12 @@ impl Render for QuickActionBar {
                                         }
                                     });
                                 if !edit_predictions_enabled_at_cursor {
-                                    inline_completion_entry = inline_completion_entry.documentation_aside(DocumentationSide::Left, |_| {
+                                    edit_prediction_entry = edit_prediction_entry.documentation_aside(DocumentationSide::Left, DocumentationEdge::Top, |_| {
                                         Label::new("You can't toggle edit predictions for this file as it is within the excluded files list.").into_any_element()
                                     });
                                 }
 
-                                menu = menu.item(inline_completion_entry);
+                                menu = menu.item(edit_prediction_entry);
                             }
 
                             menu = menu.separator();
@@ -452,7 +467,7 @@ impl Render for QuickActionBar {
                                             }
                                         });
                                     if !diagnostics_enabled {
-                                        inline_diagnostics_item = inline_diagnostics_item.disabled(true).documentation_aside(DocumentationSide::Left, |_|  Label::new("Inline diagnostics are not available until regular diagnostics are enabled.").into_any_element());
+                                        inline_diagnostics_item = inline_diagnostics_item.disabled(true).documentation_aside(DocumentationSide::Left, DocumentationEdge::Top, |_|  Label::new("Inline diagnostics are not available until regular diagnostics are enabled.").into_any_element());
                                     }
                                     menu = menu.item(inline_diagnostics_item)
                                 }
@@ -578,9 +593,24 @@ impl Render for QuickActionBar {
                                     move |window, cx| {
                                         let new_value = !vim_mode_enabled;
                                         VimModeSetting::override_global(VimModeSetting(new_value), cx);
+                                        HelixModeSetting::override_global(HelixModeSetting(false), cx);
                                         window.refresh();
                                     }
                                 },
+                            );
+                            menu = menu.toggleable_entry(
+                                "Helix Mode",
+                                helix_mode_enabled,
+                                IconPosition::Start,
+                                None,
+                                {
+                                    move |window, cx| {
+                                        let new_value = !helix_mode_enabled;
+                                        HelixModeSetting::override_global(HelixModeSetting(new_value), cx);
+                                        VimModeSetting::override_global(VimModeSetting(false), cx);
+                                        window.refresh();
+                                    }
+                                }
                             );
 
                             menu
@@ -597,9 +627,7 @@ impl Render for QuickActionBar {
             .children(self.render_preview_button(self.workspace.clone(), cx))
             .children(search_button)
             .when(
-                AgentSettings::get_global(cx).enabled
-                    && AgentSettings::get_global(cx).button
-                    && !DisableAiSettings::get_global(cx).disable_ai,
+                AgentSettings::get_global(cx).enabled(cx) && AgentSettings::get_global(cx).button,
                 |bar| bar.child(assistant_button),
             )
             .children(code_actions_dropdown)
@@ -652,8 +680,8 @@ impl RenderOnce for QuickActionBarButton {
             .icon_size(IconSize::Small)
             .style(ButtonStyle::Subtle)
             .toggle_state(self.toggled)
-            .tooltip(move |window, cx| {
-                Tooltip::for_action_in(tooltip.clone(), &*action, &self.focus_handle, window, cx)
+            .tooltip(move |_window, cx| {
+                Tooltip::for_action_in(tooltip.clone(), &*action, &self.focus_handle, cx)
             })
             .on_click(move |event, window, cx| (self.on_click)(event, window, cx))
     }
