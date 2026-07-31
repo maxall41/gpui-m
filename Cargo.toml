@@ -636,10 +636,6 @@ httparse = "1.10"
 idna = "1.0"
 ignore = "0.4.22"
 # Fork adds IEEEFP (floating point) TIFF and single-channel image support:
-# https://github.com/image-rs/image/pull/2251. Switch back to the crates.io
-# release once that lands upstream.
-# Features are image's default features minus "avif", which only adds an encoder
-# (rav1e); decoding AVIF would additionally need the non-default "avif-native" feature.
 image = { git = "https://github.com/maxall41/image.git", branch = "single-channel-support", default-features = false, features = [
     "bmp",
     "dds",
