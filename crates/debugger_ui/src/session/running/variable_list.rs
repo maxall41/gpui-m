@@ -8,8 +8,9 @@ use dap::{
 use editor::Editor;
 use gpui::{
     Action, AnyElement, ClickEvent, ClipboardItem, Context, DismissEvent, Empty, Entity,
-    FocusHandle, Focusable, Hsla, MouseDownEvent, Point, Subscription, TextStyleRefinement,
-    UniformListScrollHandle, WeakEntity, actions, anchored, deferred, uniform_list,
+    FocusHandle, Focusable, Hsla, MouseDownEvent, Point, Subscription, TaskExt,
+    TextStyleRefinement, UniformListScrollHandle, WeakEntity, actions, anchored, deferred,
+    uniform_list,
 };
 use itertools::Itertools;
 use menu::{SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -297,9 +298,10 @@ impl VariableList {
                     contains_local_scope = true;
                 }
 
-                self.session.update(cx, |session, cx| {
-                    !session.variables(scope.variables_reference, cx).is_empty()
-                })
+                scope.expensive
+                    || self.session.update(cx, |session, cx| {
+                        !session.variables(scope.variables_reference, cx).is_empty()
+                    })
             })
             .map(|scope| {
                 (
@@ -346,12 +348,13 @@ impl VariableList {
                 .or_insert(EntryState {
                     depth: path.indices.len(),
                     is_expanded: dap_kind.as_scope().is_some_and(|scope| {
-                        (scopes_count == 1 && !contains_local_scope)
-                            || scope
-                                .presentation_hint
-                                .as_ref()
-                                .map(|hint| *hint == ScopePresentationHint::Locals)
-                                .unwrap_or(scope.name.to_lowercase().starts_with("local"))
+                        !scope.expensive
+                            && ((scopes_count == 1 && !contains_local_scope)
+                                || scope
+                                    .presentation_hint
+                                    .as_ref()
+                                    .map(|hint| *hint == ScopePresentationHint::Locals)
+                                    .unwrap_or(scope.name.to_lowercase().starts_with("local")))
                     }),
                     parent_reference: container_reference,
                     has_children: variables_reference != 0,
@@ -529,7 +532,7 @@ impl VariableList {
 
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.edited_path.take();
-        self.focus_handle.focus(window);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -1067,7 +1070,7 @@ impl VariableList {
             editor.select_all(&editor::actions::SelectAll, window, cx);
             editor
         });
-        editor.focus_handle(cx).focus(window);
+        editor.focus_handle(cx).focus(window, cx);
         editor
     }
 
@@ -1076,7 +1079,12 @@ impl VariableList {
         presentation_hint: Option<&VariablePresentationHint>,
         cx: &Context<Self>,
     ) -> VariableColor {
-        let syntax_color_for = |name| cx.theme().syntax().get(name).color;
+        let syntax_color_for = |name| {
+            cx.theme()
+                .syntax()
+                .style_for_name(name)
+                .and_then(|style| style.color)
+        };
         let name = if self.disabled {
             Some(Color::Disabled.color(cx))
         } else {
@@ -1568,13 +1576,13 @@ impl Render for VariableList {
                 .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
                 .gap_1_5()
                 .size_full()
-                .flex_grow(),
+                .flex_grow_1(),
             )
             .children(self.open_context_menu.as_ref().map(|(menu, position, _)| {
                 deferred(
                     anchored()
                         .position(*position)
-                        .anchor(gpui::Corner::TopLeft)
+                        .anchor(gpui::Anchor::TopLeft)
                         .child(menu.clone()),
                 )
                 .with_priority(1)

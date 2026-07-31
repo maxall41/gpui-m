@@ -5,22 +5,24 @@ use crate::{
     },
     terminal_codegen::{CLEAR_INPUT, CodegenEvent, TerminalCodegen},
 };
-use agent::HistoryStore;
+use agent::ThreadStore;
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result};
 
-use cloud_llm_client::CompletionIntent;
 use collections::{HashMap, VecDeque};
 use editor::{MultiBuffer, actions::SelectAll};
 use fs::Fs;
 use gpui::{App, Entity, Focusable, Global, Subscription, Task, UpdateGlobal, WeakEntity};
 use language::Buffer;
 use language_model::{
-    ConfiguredModel, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
-    Role, report_anthropic_event,
+    CompletionIntent, ConfiguredModel, LanguageModelRegistry, LanguageModelRequest,
+    LanguageModelRequestMessage, Role,
+};
+use language_models::provider::anthropic::telemetry::{
+    AnthropicCompletionType, AnthropicEventData, AnthropicEventType, report_anthropic_event,
 };
 use project::Project;
-use prompt_store::{PromptBuilder, PromptStore};
+use prompt_store::PromptBuilder;
 use std::sync::Arc;
 use terminal_view::TerminalView;
 use ui::prelude::*;
@@ -61,8 +63,7 @@ impl TerminalInlineAssistant {
         terminal_view: &Entity<TerminalView>,
         workspace: WeakEntity<Workspace>,
         project: WeakEntity<Project>,
-        thread_store: Entity<HistoryStore>,
-        prompt_store: Option<Entity<PromptStore>>,
+        thread_store: Entity<ThreadStore>,
         initial_prompt: Option<String>,
         window: &mut Window,
         cx: &mut App,
@@ -87,7 +88,6 @@ impl TerminalInlineAssistant {
                 session_id,
                 self.fs.clone(),
                 thread_store.clone(),
-                prompt_store.clone(),
                 project.clone(),
                 workspace.clone(),
                 window,
@@ -127,7 +127,7 @@ impl TerminalInlineAssistant {
         if let Some(prompt_editor) = assist.prompt_editor.as_ref() {
             prompt_editor.update(cx, |this, cx| {
                 this.editor.update(cx, |editor, cx| {
-                    window.focus(&editor.focus_handle(cx));
+                    window.focus(&editor.focus_handle(cx), cx);
                     editor.select_all(&SelectAll, window, cx);
                 });
             });
@@ -265,7 +265,6 @@ impl TerminalInlineAssistant {
             LanguageModelRequest {
                 thread_id: None,
                 prompt_id: None,
-                mode: None,
                 intent: Some(CompletionIntent::TerminalInlineAssist),
                 messages: vec![request_message],
                 tools: Vec::new(),
@@ -273,6 +272,9 @@ impl TerminalInlineAssistant {
                 stop: Vec::new(),
                 temperature,
                 thinking_allowed: false,
+                thinking_effort: None,
+                speed: None,
+                compact_at_tokens: None,
             }
         }))
     }
@@ -292,7 +294,7 @@ impl TerminalInlineAssistant {
                 .terminal
                 .update(cx, |this, cx| {
                     this.clear_block_below_cursor(cx);
-                    this.focus_handle(cx).focus(window);
+                    this.focus_handle(cx).focus(window, cx);
                 })
                 .log_err();
 
@@ -309,13 +311,13 @@ impl TerminalInlineAssistant {
                     (
                         "rejected",
                         "Assistant Response Rejected",
-                        language_model::AnthropicEventType::Reject,
+                        AnthropicEventType::Reject,
                     )
                 } else {
                     (
                         "accepted",
                         "Assistant Response Accepted",
-                        language_model::AnthropicEventType::Accept,
+                        AnthropicEventType::Accept,
                     )
                 };
 
@@ -332,8 +334,8 @@ impl TerminalInlineAssistant {
 
                 report_anthropic_event(
                     &model,
-                    language_model::AnthropicEventData {
-                        completion_type: language_model::AnthropicCompletionType::Terminal,
+                    AnthropicEventData {
+                        completion_type: AnthropicCompletionType::Terminal,
                         event: anthropic_event_type,
                         language_name: None,
                         message_id,
@@ -369,7 +371,7 @@ impl TerminalInlineAssistant {
             .terminal
             .update(cx, |this, cx| {
                 this.clear_block_below_cursor(cx);
-                this.focus_handle(cx).focus(window);
+                this.focus_handle(cx).focus(window, cx);
             })
             .is_ok()
     }
